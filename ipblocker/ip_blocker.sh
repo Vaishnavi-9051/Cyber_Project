@@ -1,26 +1,41 @@
 #!/bin/bash
 
-# IP Blocker - Enhanced with attack pattern detection
-# Main execution script
+# Enhanced IP Blocker with Advanced Attack Detection
+# Auto-detects installation directory and includes all security features
+
+# Auto-detect script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Load configuration
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/config.conf"
+CONFIG_FILE="$SCRIPT_DIR/config.conf"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "❌ ERROR: Config file not found at $CONFIG_FILE"
+    echo "➡  Please run setup.sh first"
+    exit 1
+fi
+
+source "$CONFIG_FILE"
 source "$SCRIPT_DIR/helpers/logger.sh"
 source "$SCRIPT_DIR/helpers/notifier.sh"
 source "$SCRIPT_DIR/helpers/reporter.sh"
 source "$SCRIPT_DIR/helpers/attack_detector.sh"
 
-# Initialize
+# Global variables
+RECENT_BLOCKED=0
+RECENT_WHITELIST=0
+RECENT_EXISTING=0
+
+# Initialize with path safety
 init() {
     # Create log directory and file
     mkdir -p "$(dirname "$APP_LOG")"
     touch "$APP_LOG"
     chmod 644 "$APP_LOG"
     
+    log "INFO" "IP Blocker started from: $SCRIPT_DIR"
     log "INFO" "IP Blocker started - $(date)"
     
-    # Create necessary files
+    # Create necessary files with full paths
     mkdir -p "$SCRIPT_DIR/logs"
     touch "$BLOCKED_DB" "$WHITELIST_FILE" "$LAST_POSITION_FILE" "$USER_CORRELATION_DB"
     
@@ -30,7 +45,7 @@ init() {
 
 # Check required tools
 check_dependencies() {
-    local deps=("grep" "awk" "ufw" "tail" "stat" "date" "iptables")
+    local deps=("grep" "awk" "ufw" "tail" "stat" "date")
     for dep in "${deps[@]}"; do
         if ! command -v "$dep" &> /dev/null; then
             log "ERROR" "Dependency missing: $dep"
@@ -69,10 +84,12 @@ extract_new_entries() {
     
     tail -c +$((last_pos + 1)) "$LOG_FILE" > "$TEMP_NEW_ENTRIES"
     
-    # Extract failed login attempts
+    # Extract failed login attempts with IP and username
     grep "Failed password\|authentication failure" "$TEMP_NEW_ENTRIES" | \
     awk '
     /Failed password/ {
+        ip = ""
+        user = ""
         for(i=1;i<=NF;i++) {
             if($i == "from") {
                 ip = $(i+1)
@@ -81,19 +98,25 @@ extract_new_entries() {
                 user = $(i+1)
             }
         }
-        print ip, user
+        if(ip != "" && user != "") {
+            print ip, user
+        }
     }
     /authentication failure/ {
+        ip = ""
         for(i=1;i<=NF;i++) {
             if($i == "rhost") {
                 ip = $(i+1)
                 break
             }
         }
-        print ip, "unknown"
+        if(ip != "") {
+            print ip, "unknown"
+        }
     }' | tr -d '()' > "$TEMP_IPS"
     
-    log "INFO" "Extracted $(wc -l < "$TEMP_IPS") new failed attempts"
+    local extracted_count=$(wc -l < "$TEMP_IPS" 2>/dev/null || echo 0)
+    log "INFO" "Extracted $extracted_count new failed attempts"
 }
 
 # Count attempts and identify malicious IPs
@@ -115,6 +138,12 @@ block_malicious_ips() {
         
         ip=$(echo "$ip_count" | awk '{print $1}')
         count=$(echo "$ip_count" | awk '{print $2}')
+        
+        # Validate IP format
+        if ! [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            log "DEBUG" "Skipping invalid IP: $ip"
+            continue
+        fi
         
         # Check if already blocked
         if is_ip_blocked "$ip"; then
@@ -149,14 +178,18 @@ block_malicious_ips() {
 # Check if IP is already blocked
 is_ip_blocked() {
     local ip=$1
-    grep -q "^$ip " "$BLOCKED_DB"
+    [[ -f "$BLOCKED_DB" ]] && grep -q "^$ip " "$BLOCKED_DB"
 }
 
 # Check if IP is whitelisted
 is_whitelisted() {
     local ip=$1
-    grep -q "^$ip$" "$WHITELIST_FILE" || \
-    grep -q "^$ip/" "$WHITELIST_FILE"
+    if [[ -f "$WHITELIST_FILE" ]]; then
+        grep -q "^$ip$" "$WHITELIST_FILE" || \
+        grep -q "^$ip/" "$WHITELIST_FILE"
+    else
+        return 1
+    fi
 }
 
 # Block IP using ufw
@@ -186,26 +219,30 @@ update_last_position() {
     echo "$1" > "$LAST_POSITION_FILE"
 }
 
-# Main execution flow
-main() {
-    init
-    analyze_logs
+# Run all attack detection features
+run_attack_detection() {
+    log "INFO" "Running advanced attack detection..."
     
-    if [[ -s "$TEMP_IPS" ]]; then
-        # Run enhanced attack detection
-        detect_global_failure_rate
-        detect_username_correlation
-        detect_connection_ratio
-        detect_extended_window_attacks
-        
-        identify_malicious_ips
-        block_malicious_ips
-        generate_report
-    else
-        log "INFO" "No malicious IPs found"
+    # Feature 1: Global Failure-Rate Monitoring
+    detect_global_failure_rate
+    
+    # Feature 2: Username-Based Correlation
+    detect_username_correlation
+    
+    # Feature 3: Global Connection Ratio Alert
+    detect_connection_ratio
+    
+    # Feature 4: Extended Time Window Detection
+    detect_extended_window_attacks
+}
+
+# Perform backup if enabled
+perform_scheduled_backup() {
+    if [[ "$BACKUP_ENABLED" == "true" ]] && [[ -f "$SCRIPT_DIR/helpers/backup.sh" ]]; then
+        log "INFO" "Running scheduled backup..."
+        source "$SCRIPT_DIR/helpers/backup.sh"
+        perform_backup
     fi
-    
-    cleanup
 }
 
 # Cleanup temporary files
@@ -214,7 +251,51 @@ cleanup() {
     log "INFO" "IP Blocker finished - $(date)"
 }
 
-# Handle signals
+# Main execution flow
+main() {
+    log "INFO" "=== IP Blocker Execution Started ==="
+    
+    if ! init; then
+        log "ERROR" "Initialization failed"
+        exit 1
+    fi
+    
+    # Analyze authentication logs
+    analyze_logs
+    
+    if [[ -s "$TEMP_IPS" ]]; then
+        log "INFO" "Processing $(wc -l < "$TEMP_IPS") failed login attempts"
+        
+        # Run enhanced attack detection
+        run_attack_detection
+        
+        # Identify and block malicious IPs
+        identify_malicious_ips
+        
+        if [[ -s "$TEMP_MALICIOUS" ]]; then
+            log "INFO" "Found $(wc -l < "$TEMP_MALICIOUS") IPs exceeding threshold"
+            block_malicious_ips
+        else
+            log "INFO" "No IPs exceeded blocking threshold"
+        fi
+        
+        # Generate report
+        generate_report
+    else
+        log "INFO" "No new failed login attempts found"
+    fi
+    
+    # Perform backup if it's time (e.g., first run of the day)
+    local current_hour=$(date +%H)
+    if [[ "$current_hour" == "00" ]]; then
+        perform_scheduled_backup
+    fi
+    
+    cleanup
+}
+
+# Handle signals for graceful shutdown
+trap 'log "INFO" "Script interrupted"; cleanup; exit 1' INT TERM
 trap cleanup EXIT
 
 # Run main function
