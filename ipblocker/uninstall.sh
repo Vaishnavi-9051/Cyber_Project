@@ -1,14 +1,6 @@
-uninstall.sh :  #!/bin/bash
-# IP Blocker Uninstall Script
-# Safely removes the IP blocker system
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/config.conf"
-
-# Load configuration if exists
-if [[ -f "$CONFIG_FILE" ]]; then
-    source "$CONFIG_FILE"
-fi
+#!/bin/bash
+# Enhanced IP Blocker Uninstall Script
+# Safe removal from /opt/ipblocker
 
 # Colors for output
 RED='\033[0;31m'
@@ -16,72 +8,103 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${YELLOW}IP Blocker Uninstaller${NC}"
-echo "==============================="
+echo -e "${YELLOW}=================================${NC}"
+echo -e "${YELLOW}   Enhanced IP Blocker Uninstall${NC}"
+echo -e "${YELLOW}=================================${NC}"
+
+# Safety check - only allow uninstall from /opt/ipblocker
+CURRENT_DIR="$(cd "$(dirname "$0")" && pwd)"
+EXPECTED_DIR="/opt/ipblocker"
+
+if [[ "$CURRENT_DIR" != "$EXPECTED_DIR" ]]; then
+    echo -e "${RED}❌ ERROR: Uninstall must be run from $EXPECTED_DIR${NC}"
+    echo -e "${YELLOW}➡  Use: sudo $EXPECTED_DIR/uninstall.sh${NC}"
+    exit 1
+fi
+
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}❌ ERROR: Please run as root${NC}"
+    echo -e "${YELLOW}➡  Use: sudo $0${NC}"
+    exit 1
+fi
 
 # Safety confirmation
-read -p "Are you sure you want to uninstall IP Blocker? (y/N): " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+echo ""
+echo -e "${YELLOW}⚠  WARNING: This will completely remove IP Blocker${NC}"
+echo -e "${YELLOW}   All configurations and data will be backed up then removed${NC}"
+echo ""
+read -p "Are you sure you want to continue? (type 'YES' to confirm): " -r
+if [[ ! $REPLY == "YES" ]]; then
     echo "Uninstall cancelled."
     exit 0
 fi
 
+echo ""
 echo -e "${YELLOW}Starting uninstall process...${NC}"
 
 # Step 1: Stop any running instances
-echo "1. Stopping running processes..."
-pkill -f "ip_blocker.sh" 2>/dev/null && echo -e "${GREEN}✓ Stopped running processes${NC}" || echo "No running processes found"
+echo "1️⃣ Stopping running processes..."
+pkill -f "ipblocker/ip_blocker.sh" 2>/dev/null
+sleep 2
+echo -e "   ${GREEN}✔ Processes stopped${NC}"
 
 # Step 2: Remove from cron
-echo "2. Removing from crontab..."
-crontab -l 2>/dev/null | grep -v "ip_blocker.sh" | crontab - && echo -e "${GREEN}✓ Removed from crontab${NC}"
+echo "2️⃣ Removing from crontab..."
+crontab -l 2>/dev/null | grep -v "ipblocker" | crontab -
+echo -e "   ${GREEN}✔ Crontab entries removed${NC}"
 
 # Step 3: Unblock all IPs blocked by this system
-echo "3. Unblocking IPs..."
-if [[ -f "$BLOCKED_DB" ]]; then
+echo "3️⃣ Unblocking IPs..."
+if [[ -f "$CURRENT_DIR/blocked_ips.db" ]]; then
     blocked_count=0
     while read -r line; do
         ip=$(echo "$line" | awk '{print $1}')
-        if [[ -n "$ip" ]]; then
+        if [[ -n "$ip" && "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             ufw delete deny from "$ip" 2>/dev/null
             ((blocked_count++))
         fi
-    done < "$BLOCKED_DB"
-    echo -e "${GREEN}✓ Unblocked $blocked_count IPs${NC}"
-fi
-
-# Step 4: Remove application files
-echo "4. Removing application files..."
-if [[ -d "$SCRIPT_DIR" ]]; then
-    # Create backup of configuration
-    backup_dir="/tmp/ip_blocker_backup_$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$backup_dir"
-    cp -r "$SCRIPT_DIR" "$backup_dir/" 2>/dev/null && echo -e "${GREEN}✓ Backup created: $backup_dir${NC}"
-    
-    # Remove main directory
-    rm -rf "$SCRIPT_DIR" && echo -e "${GREEN}✓ Removed application directory${NC}"
+    done < "$CURRENT_DIR/blocked_ips.db"
+    echo -e "   ${GREEN}✔ Unblocked $blocked_count IPs${NC}"
 else
-    echo -e "${YELLOW}⚠ Application directory not found${NC}"
+    echo -e "   ${YELLOW}⚠ No blocked IPs database found${NC}"
 fi
 
-# Step 5: Remove temporary files
-echo "5. Cleaning temporary files..."
-rm -f /tmp/ip_blocker_*.tmp /tmp/ip_user_list.tmp && echo -e "${GREEN}✓ Cleaned temporary files${NC}"
+# Step 4: Create comprehensive backup
+echo "4️⃣ Creating backup..."
+BACKUP_DIR="/tmp/ipblocker_backup_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$BACKUP_DIR"
+cp -r "$CURRENT_DIR" "$BACKUP_DIR/" 2>/dev/null
+echo -e "   ${GREEN}✔ Backup created: $BACKUP_DIR${NC}"
 
-# Step 6: Final verification
-echo "6. Final verification..."
-if [[ ! -d "$SCRIPT_DIR" ]]; then
+# Step 5: Remove application files
+echo "5️⃣ Removing application files..."
+rm -rf "$CURRENT_DIR" && \
+echo -e "   ${GREEN}✔ Application directory removed${NC}" || \
+echo -e "   ${RED}❌ Error removing directory${NC}"
+
+# Step 6: Clean temporary files
+echo "6️⃣ Cleaning temporary files..."
+rm -f /tmp/ip_blocker_*.tmp /tmp/ip_user_list.tmp
+echo -e "   ${GREEN}✔ Temporary files cleaned${NC}"
+
+# Final verification
+echo ""
+echo "7️⃣ Final verification..."
+if [[ ! -d "$CURRENT_DIR" ]]; then
     echo -e "${GREEN}🎉 IP Blocker successfully uninstalled!${NC}"
     echo ""
+    echo -e "${YELLOW}📁 Backup location:${NC}"
+    echo "   $BACKUP_DIR"
+    echo ""
     echo -e "${YELLOW}Note:${NC}"
-    echo "- Configuration backup saved to: $backup_dir"
-    echo "- Manual ufw rules were preserved"
-    echo "- System logs were not modified"
+    echo "   - Manual UFW rules were preserved"
+    echo "   - System logs were not modified"
+    echo "   - Configuration backup saved above"
 else
     echo -e "${RED}❌ Uninstall may not have completed fully${NC}"
-    echo "Please manually check: $SCRIPT_DIR"
+    echo "   Please check: $CURRENT_DIR"
 fi
 
 echo ""
-echo -e "${YELLOW}Thank you for using IP Blocker!${NC}"
+echo -e "${YELLOW}Thank you for using Enhanced IP Blocker!${NC}" 
